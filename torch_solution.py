@@ -7,6 +7,7 @@ import warnings
 import torch
 import torch.nn as nn
 from s_annealing_cost_solution import compute_proper_ratio_pl
+from sklearn.cluster import KMeans
 warnings.filterwarnings("ignore")
 
 def compute_distance_matrix(X, center_roads):
@@ -23,11 +24,17 @@ def compute_distance_matrix(X, center_roads):
     return distance_matrix_km
 
 def compute_output_costs(distance_matrix_km, flows, maximal_distance):
-    output_costs = (distance_matrix_km.min(axis=1)>maximal_distance)*flows
-    return output_costs
+    outputs_costs=(
+        distance_matrix_km.min(axis=0).values * (distance_matrix_km.min(axis=0).values>maximal_distance) 
+        # + 0.5*distance_matrix_km.mean(axis=0)/2
+        # + 0.01*(flows*(distance_matrix_km.min(axis=0).values<maximal_distance)*distance_matrix_km.min(axis=0).values/100).mean()
+        +0.05*(distance_matrix_km<maximal_distance)*distance_matrix_km*flows/1000
+        
+    )
+    return outputs_costs.mean()
 
-number_clusters = 120
-maximal_distance = 300
+number_clusters = 200
+maximal_distance = 50
 steps = 20
 if __name__=="__main__":
     raw_data = pd.read_csv(os.path.join("data","tmja-2019.csv"), sep=";")
@@ -51,20 +58,30 @@ if __name__=="__main__":
     df['proper_ratio_PL'] = df["ratio_PL"].apply(compute_proper_ratio_pl)
     df.dropna(inplace=True)
     df["daily_flow_trucks"] = (df["proper_ratio_PL"]/100) *df['TMJA']
-    
-    Y = np.random.rand(number_clusters,2)
-    Y[:,0]*=5
+    df['scaled_flow_trucks'] = df['daily_flow_trucks']/1000
+    Y = np.random.randn(number_clusters,2)
+    Y[:,0]+=5
     Y[:,0]+=1
-    Y[:,1]*=64
-    Y[:,1]+=9
+    Y[:,1]+=64
+
+    cluster = KMeans(n_clusters=number_clusters,init='k-means++')
+    cluster.fit(df[['center_x','center_y']])
+    Y = cluster.cluster_centers_
+
     Y_0 = torch.tensor(Y, requires_grad=True)
     x = Y_0
     center_roads = torch.Tensor(df[['center_x','center_y']].values)
-    flows = torch.Tensor(df['daily_flow_trucks'])
+    flows = torch.Tensor(df['daily_flow_trucks'].values)
     optimizer = torch.optim.SGD([x], lr=0.1)
     for i in range(steps):
+        # 
         optimizer.zero_grad()
+        
         distance_matrix = compute_distance_matrix(x, center_roads)
+        # distance_matrix_between_points = compute_distance_matrix(x, x)
         total_loss = compute_output_costs(distance_matrix, flows, maximal_distance)
         total_loss.backward()
         optimizer.step()
+        if i%20==0:
+            print(total_loss.detach())
+        # x = torch.clamp(x, min=2, max=73)
